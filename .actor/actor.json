@@ -1,0 +1,19 @@
+{
+	"$schema": "https://apify.com/schemas/v1/actor.ide.json",
+	"actorSpecification": 1,
+	"name": "aliexpress-product-status-checker",
+	"title": "AliExpress Product Status Checker",
+	"description": "Checks whether AliExpress product pages are still available by detecting the og:title meta tag.",
+	"version": "0.0",
+	"buildTag": "latest",
+	"meta": {
+		"templateId": "ts-crawlee-cheerio",
+		"generatedBy": "Claude Code with Claude Opus 4.8"
+	},
+	"input": "./input_schema.json",
+	"output": "./output_schema.json",
+	"storages": {
+		"dataset": "./dataset_schema.json"
+	},
+	"dockerfile": "../Dockerfile"
+}

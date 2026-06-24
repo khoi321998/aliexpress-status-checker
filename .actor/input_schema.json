@@ -1,0 +1,64 @@
+{
+    "$schema": "https://apify.com/schemas/v1/input.ide.json",
+    "title": "AliExpress Product Status Checker",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "mode": {
+            "title": "Mode",
+            "type": "string",
+            "description": "What kind of URL to check: product item pages or seller/store pages.",
+            "editor": "select",
+            "default": "product",
+            "enum": ["product", "seller"],
+            "enumTitles": ["Product (item page)", "Seller (store page)"]
+        },
+        "startUrls": {
+            "title": "AliExpress URLs",
+            "type": "array",
+            "description": "List of AliExpress URLs to check. For product mode use item pages (e.g. https://vi.aliexpress.com/item/1005004771213104.html); for seller mode use store pages (e.g. https://www.aliexpress.com/store/1101692994). Each URL is checked independently.",
+            "editor": "requestListSources",
+            "prefill": [
+                {
+                    "url": "https://vi.aliexpress.com/item/1005004771213104.html"
+                }
+            ]
+        },
+        "proxyConfiguration": {
+            "title": "Proxy configuration",
+            "type": "object",
+            "description": "Proxy settings. RESIDENTIAL Apify Proxy is strongly recommended — AliExpress aggressively blocks datacenter IPs and may serve an anti-bot page that looks like an unavailable product. Requires being logged in (apify login) locally and a plan that includes residential proxy.",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": ["RESIDENTIAL"],
+                "apifyProxyCountry": "US"
+            }
+        },
+        "maxConcurrency": {
+            "title": "Max concurrency",
+            "type": "integer",
+            "description": "Maximum number of product URLs checked in parallel. Keep low (3-5) to avoid triggering AliExpress anti-bot.",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 50
+        },
+        "sameDomainDelaySecs": {
+            "title": "Delay between requests (seconds)",
+            "type": "integer",
+            "description": "Minimum delay between consecutive requests to AliExpress. Increasing this (e.g. 2-5) reduces blocking, especially without a residential proxy.",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 60
+        },
+        "maxRequestRetries": {
+            "title": "Max request retries",
+            "type": "integer",
+            "description": "How many times to retry a URL (with a fresh session/proxy) when it appears blocked, before recording it as an error.",
+            "default": 3,
+            "minimum": 0,
+            "maximum": 10
+        }
+    },
+    "required": ["startUrls"]
+}
