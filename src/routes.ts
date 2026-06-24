@@ -157,10 +157,9 @@ router.addDefaultHandler(async ({ request, response, body, $, log, pushData }) =
     // Output only the fields the user cares about.
     await pushData({
         url: result.url,
-        available: result.available,
-        mode: result.mode,
-        finalUrl: result.finalUrl,
-        status: result.status,
+        active: result.available === true,
+        reason: result.status,
+        checkedAt: result.checkedAt,
     });
 });
 
@@ -174,9 +173,8 @@ export async function failedRequestHandler({ request, log }: CheerioCrawlingCont
     log.warning(`[${mode}] ERROR after retries: ${error.message}`, { url: originalUrl });
     await Actor.pushData({
         url: originalUrl,
-        available: null,
-        mode,
-        finalUrl: request.loadedUrl ?? null,
-        status: 'error' as const,
+        active: false,
+        reason: 'error' as const,
+        checkedAt: new Date().toISOString(),
     });
 }

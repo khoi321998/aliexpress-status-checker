@@ -57,11 +57,8 @@ The Actor pushes one row per input URL to the dataset. You can download it as JS
 ```json
 {
     "url": "https://vi.aliexpress.com/item/1005004771213104.html",
-    "productId": "1005004771213104",
-    "available": true,
-    "status": "available",
-    "title": "Essager Universal Desktop Mobile Phone Holder Stand - AliExpress 202192403",
-    "httpStatus": 200,
+    "active": true,
+    "reason": "available",
     "checkedAt": "2026-06-23T10:58:41.936Z"
 }
 ```
@@ -71,14 +68,9 @@ The Actor pushes one row per input URL to the dataset. You can download it as JS
 | Field | Description |
 | --- | --- |
 | `url` | The original product URL you provided. |
-| `finalUrl` | The URL actually fetched, after normalization and redirects. |
-| `productId` | Numeric AliExpress item ID parsed from the URL (or `null`). |
-| `available` | `true` if live, `false` if removed/disabled, `null` if it could not be determined. |
-| `status` | `available`, `unavailable`, or `error`. |
-| `title` | The `og:title` content for live products, otherwise `null`. |
-| `httpStatus` | HTTP status code of the response. |
-| `error` | Error message when `status` is `error` (e.g. blocked after all retries). |
-| `checkedAt` | ISO timestamp of the check. |
+| `active` | `true` if live, `false` if removed/disabled or could not be determined. |
+| `reason` | `available`, `unavailable`, or `error`. |
+| `checkedAt` | ISO timestamp when the check completed. |
 
 ## Cost estimation
 

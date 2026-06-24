@@ -6,30 +6,26 @@
         "overview": {
             "title": "Overview",
             "transformation": {
-                "fields": ["mode", "status", "available", "url", "finalUrl"]
+                "fields": ["url", "active", "reason", "checkedAt"]
             },
             "display": {
                 "component": "table",
                 "properties": {
-                    "mode": {
-                        "label": "Mode",
-                        "format": "text"
-                    },
-                    "status": {
-                        "label": "Status",
-                        "format": "text"
-                    },
-                    "available": {
-                        "label": "Available",
-                        "format": "boolean"
-                    },
                     "url": {
                         "label": "URL",
                         "format": "link"
                     },
-                    "finalUrl": {
-                        "label": "Final URL",
-                        "format": "link"
+                    "active": {
+                        "label": "Active",
+                        "format": "boolean"
+                    },
+                    "reason": {
+                        "label": "Reason",
+                        "format": "text"
+                    },
+                    "checkedAt": {
+                        "label": "Checked At",
+                        "format": "text"
                     }
                 }
             }
