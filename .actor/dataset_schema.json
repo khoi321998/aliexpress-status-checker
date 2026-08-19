@@ -6,7 +6,7 @@
         "overview": {
             "title": "Overview",
             "transformation": {
-                "fields": ["url", "active", "reason", "checkedAt"]
+                "fields": ["url", "country", "active", "reason", "checkedAt"]
             },
             "display": {
                 "component": "table",
@@ -14,6 +14,10 @@
                     "url": {
                         "label": "URL",
                         "format": "link"
+                    },
+                    "country": {
+                        "label": "Market",
+                        "format": "text"
                     },
                     "active": {
                         "label": "Active",

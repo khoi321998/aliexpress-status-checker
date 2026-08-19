@@ -16,24 +16,13 @@
         "startUrls": {
             "title": "AliExpress URLs",
             "type": "array",
-            "description": "List of AliExpress URLs to check. For product mode use item pages (e.g. https://vi.aliexpress.com/item/1005004771213104.html); for seller mode use store pages (e.g. https://www.aliexpress.com/store/1101692994). Each URL is checked independently.",
+            "description": "List of AliExpress URLs to check. For product mode use item pages (e.g. https://es.aliexpress.com/item/1005008991183191.html); for seller mode use store pages (e.g. https://www.aliexpress.com/store/1101692994). Each URL is checked independently. In product mode the market is read from the URL itself (the locale subdomain or the gatewayAdapt stamp) and the check runs on that storefront through a residential proxy in that same country — paste the URL exactly as your buyers see it, since a product can be live in one country and gone in another. URLs without a regional signal (www./m.) are checked as US.",
             "editor": "requestListSources",
             "prefill": [
                 {
                     "url": "https://vi.aliexpress.com/item/1005004771213104.html"
                 }
             ]
-        },
-        "proxyConfiguration": {
-            "title": "Proxy configuration",
-            "type": "object",
-            "description": "Proxy settings. RESIDENTIAL Apify Proxy is strongly recommended — AliExpress aggressively blocks datacenter IPs and may serve an anti-bot page that looks like an unavailable product. Requires being logged in (apify login) locally and a plan that includes residential proxy.",
-            "editor": "proxy",
-            "default": {
-                "useApifyProxy": true,
-                "apifyProxyGroups": ["RESIDENTIAL"],
-                "apifyProxyCountry": "US"
-            }
         },
         "maxConcurrency": {
             "title": "Max concurrency",
@@ -46,7 +35,7 @@
         "sameDomainDelaySecs": {
             "title": "Delay between requests (seconds)",
             "type": "integer",
-            "description": "Minimum delay between consecutive requests to AliExpress. Increasing this (e.g. 2-5) reduces blocking, especially without a residential proxy.",
+            "description": "Minimum delay between consecutive requests to AliExpress. Increasing this (e.g. 2-5) reduces blocking.",
             "default": 0,
             "minimum": 0,
             "maximum": 60
