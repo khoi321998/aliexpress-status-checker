@@ -24,6 +24,12 @@
                 }
             ]
         },
+        "verifyShipTo": {
+            "title": "Verify the product ships to the market",
+            "type": "boolean",
+            "description": "Product mode only. The page HTML only reveals whether a listing still EXISTS — a product that is live but not shipped to your market returns a page that is byte-for-byte indistinguishable from an available one, because AliExpress loads all product data client-side. With this on, the Actor additionally asks the same signed API the page itself calls, so \"not available in your location\" is reported as unavailable instead of available. Turn it off to fall back to the faster HTML-only check, which detects deleted listings only.",
+            "default": true
+        },
         "maxConcurrency": {
             "title": "Max concurrency",
             "type": "integer",

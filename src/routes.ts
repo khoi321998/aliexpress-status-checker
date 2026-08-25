@@ -1,7 +1,9 @@
 import { type CheerioCrawlingContext, createCheerioRouter } from '@crawlee/cheerio';
 import { Actor } from 'apify';
 
+import { currentActorRunId } from './actorRun.js';
 import { DEFAULT_SHIP_TO_COUNTRY, detectShipToCountry, storefrontHost } from './country.js';
+import { probeAvailability, type SendRequest } from './mtop.js';
 
 // Use the exact Cheerio type Crawlee passes in its context, to avoid the
 // dual-package (CJS vs ESM) `cheerio` type mismatch.
@@ -35,6 +37,26 @@ export interface CheckResult {
 
 /** Back-compat alias. */
 export type ProductStatus = CheckResult;
+
+/**
+ * One dataset row — the shape the user actually receives. Deliberately narrower than
+ * {@link CheckResult}, which carries diagnostics that only matter inside the crawl.
+ *
+ * `actorRunId` is required rather than optional: every row states which run produced it, and `null`
+ * is the honest value for a local run (see {@link currentActorRunId}). Leaving the field off
+ * entirely would make "ran locally" indistinguishable from "we forgot to stamp it".
+ */
+export interface OutputItem {
+    /** The original URL provided in the input. */
+    url: string;
+    /** ISO-3166 alpha-2 market the check ran under. */
+    country: string;
+    active: boolean;
+    reason: CheckResult['status'];
+    checkedAt: string;
+    /** ID of the platform run that produced this row; `null` when running locally. */
+    actorRunId: string | null;
+}
 
 /**
  * Extract the numeric product ID from an AliExpress item URL,
@@ -184,23 +206,52 @@ export function parseProductStatus(
 export const router = createCheerioRouter();
 
 // We never follow links — each input URL is checked in isolation.
-router.addDefaultHandler(async ({ request, response, body, $, log, pushData }) => {
+router.addDefaultHandler(async ({ request, response, body, $, log, pushData, sendRequest }) => {
     const originalUrl = (request.userData?.originalUrl as string | undefined) ?? request.url;
     const mode = ((request.userData?.mode as Mode | undefined) ?? 'product') satisfies Mode;
     const country = (request.userData?.country as string | undefined) ?? DEFAULT_SHIP_TO_COUNTRY;
+    const verifyShipTo = (request.userData?.verifyShipTo as boolean | undefined) ?? true;
     const finalUrl = request.loadedUrl ?? request.url;
     const html = typeof body === 'string' ? body : body.toString('utf8');
 
     const result = parseStatus(mode, $, originalUrl, finalUrl, response?.statusCode ?? null, html, country);
 
+    // The HTML says only whether the listing still EXISTS. Whether the seller ships it to `country`
+    // lives behind the same signed API the page itself calls, so ask it — reusing this request's
+    // session cookies and its per-country proxy exit, which is what makes the call look legitimate.
+    // Only worth asking when the HTML already said "exists": a deleted listing has nothing to ship.
+    if (verifyShipTo && mode === 'product' && result.available && result.productId) {
+        const verdict = await probeAvailability(
+            sendRequest as unknown as SendRequest,
+            result.productId,
+            country,
+            (message, data) => log.debug(message, data),
+        );
+        if (verdict.status === 'blocked') {
+            // Not a verdict about the product — a verdict about our session. Throwing rotates onto a
+            // fresh proxy IP rather than recording a guess.
+            throw new Error(
+                `MTOP pdp.pc.query did not answer for ${result.productId} in ${country} ` +
+                    `(ret "${verdict.ret}", ${verdict.reason}). Retrying with a new session.`,
+            );
+        }
+        if (verdict.status === 'unavailable') {
+            result.available = false;
+            result.status = 'unavailable';
+        }
+    }
+
     const id = result.productId ?? result.storeId;
     if (result.available) {
         log.info(`[${mode}] AVAILABLE: ${result.title}`, { url: originalUrl, id, country, htmlLength: result.htmlLength });
     } else {
-        log.info(`[${mode}] UNAVAILABLE`, {
+        // A title on an unavailable row means the listing exists but is not sold into this market,
+        // as opposed to having been deleted outright.
+        log.info(`[${mode}] UNAVAILABLE${result.title ? ' (not sold in this market)' : ' (listing removed)'}`, {
             url: originalUrl,
             id,
             country,
+            title: result.title,
             httpStatus: result.httpStatus,
             htmlLength: result.htmlLength,
         });
@@ -208,13 +259,15 @@ router.addDefaultHandler(async ({ request, response, body, $, log, pushData }) =
 
     // Output only the fields the user cares about. `country` is part of the answer, not metadata:
     // "unavailable" is only ever true *for that market*.
-    await pushData({
+    const item: OutputItem = {
         url: result.url,
         country: result.country,
         active: result.available === true,
         reason: result.status,
         checkedAt: result.checkedAt,
-    });
+        actorRunId: currentActorRunId(),
+    };
+    await pushData(item);
 });
 
 /**
@@ -226,11 +279,13 @@ export async function failedRequestHandler({ request, log }: CheerioCrawlingCont
     const mode = ((request.userData?.mode as Mode | undefined) ?? 'product') satisfies Mode;
     const country = (request.userData?.country as string | undefined) ?? DEFAULT_SHIP_TO_COUNTRY;
     log.warning(`[${mode}] ERROR after retries: ${error.message}`, { url: originalUrl, country });
-    await Actor.pushData({
+    const item: OutputItem = {
         url: originalUrl,
         country,
         active: false,
-        reason: 'error' as const,
+        reason: 'error',
         checkedAt: new Date().toISOString(),
-    });
+        actorRunId: currentActorRunId(),
+    };
+    await Actor.pushData(item);
 }

@@ -7,18 +7,23 @@ import { Actor, log } from 'apify';
 
 // this is ESM project, and as such, it requires you to specify extensions in your relative imports
 // note that we need to use `.js` even when inside TS files
+import { currentActorRunId } from './actorRun.js';
 import { DEFAULT_SHIP_TO_COUNTRY, localeCookie, resolveShipToCountry } from './country.js';
 import { failedRequestHandler, type Mode, normalizeUrl, router } from './routes.js';
 
 interface Input {
     startUrls: { url: string }[];
     mode: Mode;
+    verifyShipTo: boolean;
     maxConcurrency: number;
     sameDomainDelaySecs: number;
     maxRequestRetries: number;
 }
 
 await Actor.init();
+
+// Stamped on every output row too, so a dataset can always be traced back to the run that filled it.
+log.info(`Actor run ID: ${currentActorRunId() ?? '(none — running locally)'}`);
 
 // Gracefully shut down when the run is aborted, to minimize cost.
 Actor.on('aborting', async () => {
@@ -30,6 +35,7 @@ Actor.on('aborting', async () => {
 const {
     startUrls = [],
     mode = 'product',
+    verifyShipTo = true,
     maxConcurrency = 5,
     sameDomainDelaySecs = 0,
     maxRequestRetries = 3,
@@ -53,7 +59,7 @@ const requests = startUrls.map(({ url }, index) => {
     return {
         url: normalized,
         uniqueKey: `${index}-${country}-${normalized}`,
-        userData: { originalUrl: url, mode, country },
+        userData: { originalUrl: url, mode, country, verifyShipTo },
     };
 });
 

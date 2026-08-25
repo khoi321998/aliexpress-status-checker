@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
+
 import { load } from 'cheerio';
 import { describe, expect, it } from 'vitest';
 
 import { detectShipToCountry, localeCookie, resolveShipToCountry, storefrontHost } from '../src/country.js';
+import { buildPdpData, buildSignedUrl, classifyMtopResponse, gatewayFor, readTokenFromSetCookie, unwrapJsonp } from '../src/mtop.js';
 import { extractProductId, looksBlocked, normalizeAliexpressUrl, normalizeUrl, parseProductStatus } from '../src/routes.js';
 
 const PRODUCT_URL = 'https://vi.aliexpress.com/item/1005004771213104.html';
@@ -139,6 +142,65 @@ describe('parseProductStatus', () => {
         const html = bigBody('<title>blocked</title>');
         const punish = 'https://login.aliexpress.com/punish?x=1';
         expect(() => parseProductStatus(load(html), PRODUCT_URL, punish, 200, html)).toThrow();
+    });
+});
+
+describe('MTOP availability probe', () => {
+    const withTitle = { ret: ['SUCCESS::调用成功'], data: { result: { PRODUCT_TITLE: { text: 'Phone Holder' } } } };
+
+    it('reads a populated payload as available', () => {
+        expect(classifyMtopResponse(withTitle)).toEqual({ status: 'available', title: 'Phone Holder', ret: 'SUCCESS::调用成功' });
+    });
+
+    it('reads SUCCESS with an empty result as "not shipped to this market"', () => {
+        // This is the exact shape behind "este artículo no está disponible en tu ubicación".
+        expect(classifyMtopResponse({ ret: ['SUCCESS::调用成功'], data: { result: {} } })).toEqual({
+            status: 'unavailable',
+            ret: 'SUCCESS::调用成功',
+        });
+    });
+
+    it('never turns an anti-bot ret into a product verdict', () => {
+        for (const ret of ['FAIL_SYS_USER_VALIDATE::RGV587_ERROR', 'FAIL_SYS_TRAFFIC_LIMIT::限流']) {
+            expect(classifyMtopResponse({ ret: [ret], data: {} }).status).toBe('blocked');
+        }
+    });
+
+    it('refuses to guess when SUCCESS carries modules but no title', () => {
+        const verdict = classifyMtopResponse({ ret: ['SUCCESS'], data: { result: { PRICE: { x: 1 } } } });
+        expect(verdict).toEqual({ status: 'blocked', ret: 'SUCCESS', reason: 'success-without-title' });
+    });
+
+    it('treats a malformed body as blocked, not as a verdict', () => {
+        expect(classifyMtopResponse(null).status).toBe('blocked');
+        expect(classifyMtopResponse('<html>captcha</html>').status).toBe('blocked');
+    });
+
+    it('unwraps the JSONP callback the endpoint is asked for', () => {
+        expect(unwrapJsonp('mtopjsonp({"ret":["SUCCESS"]});')).toBe('{"ret":["SUCCESS"]}');
+        expect(unwrapJsonp('{"ret":["SUCCESS"]}')).toBe('{"ret":["SUCCESS"]}');
+    });
+
+    it('picks the MTOP token out of Set-Cookie, ignoring the timestamp suffix', () => {
+        expect(readTokenFromSetCookie(['_m_h5_tk=abc123_1750000000000; path=/', 'other=1'])).toBe('abc123');
+        expect(readTokenFromSetCookie(undefined)).toBeNull();
+        expect(readTokenFromSetCookie(['unrelated=1'])).toBeNull();
+    });
+
+    it('sends non-US markets to the global gateway and US to the .us one', () => {
+        expect(gatewayFor('ES')).toMatchObject({ acsBase: 'https://acs.aliexpress.com/h5', origin: 'https://es.aliexpress.com', site: 'glo' });
+        expect(gatewayFor('US')).toMatchObject({ acsBase: 'https://acs.aliexpress.us/h5', site: 'usa' });
+    });
+
+    it('signs with MD5(token & t & appKey & data) and carries the ship-to in the payload', () => {
+        const gateway = gatewayFor('ES');
+        const data = buildPdpData('1005008003575937', 'ES', gateway);
+        expect(JSON.parse(data)).toMatchObject({ productId: '1005008003575937', country: 'ES', clientType: 'pc' });
+
+        const url = new URL(buildSignedUrl(data, 'tok', gateway, 1_750_000_000_000));
+        expect(url.searchParams.get('sign')).toBe(createHash('md5').update(`tok&1750000000000&12574478&${data}`).digest('hex'));
+        expect(url.searchParams.get('api')).toBe('mtop.aliexpress.pdp.pc.query');
+        expect(url.searchParams.get('data')).toBe(data);
     });
 });
 
