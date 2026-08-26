@@ -1,7 +1,7 @@
 # Specify the base Docker image. You can read more about
 # the available images at https://crawlee.dev/docs/guides/docker-images
 # You can also use any other image from Docker Hub.
-FROM apify/actor-node:24 AS builder
+FROM apify/actor-node-playwright-chrome:24 AS builder
 
 # Check preinstalled packages
 RUN npm ls @crawlee/core apify puppeteer playwright
@@ -22,7 +22,7 @@ COPY --chown=myuser:myuser . ./
 RUN npm run build
 
 # Create final image
-FROM apify/actor-node:24
+FROM apify/actor-node-playwright-chrome:24
 
 # Check preinstalled packages
 RUN npm ls @crawlee/core apify puppeteer playwright
@@ -45,7 +45,9 @@ RUN npm --quiet set progress=false \
     && rm -r ~/.npm
 
 # Copy built JS files from builder image
-COPY --from=builder --chown=myuser:myuser /usr/src/app/dist ./dist
+# NOTE: the apify/actor-node-playwright-chrome:24 image uses WORKDIR /home/myuser,
+# not /usr/src/app, so the build output lives in /home/myuser/dist.
+COPY --from=builder --chown=myuser:myuser /home/myuser/dist ./dist
 
 # Next, copy the remaining files and directories with the source code.
 # Since we do this after NPM install, quick build will be really fast

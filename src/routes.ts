@@ -1,291 +1,155 @@
-import { type CheerioCrawlingContext, createCheerioRouter } from '@crawlee/cheerio';
-import { Actor } from 'apify';
+import type { PlaywrightCrawlingContext } from '@crawlee/playwright';
+import { createPlaywrightRouter } from '@crawlee/playwright';
+import type { Log } from 'apify';
 
-import { currentActorRunId } from './actorRun.js';
-import { DEFAULT_SHIP_TO_COUNTRY, detectShipToCountry, storefrontHost } from './country.js';
-import { probeAvailability, type SendRequest } from './mtop.js';
-
-// Use the exact Cheerio type Crawlee passes in its context, to avoid the
-// dual-package (CJS vs ESM) `cheerio` type mismatch.
-type CheerioAPI = CheerioCrawlingContext['$'];
-
-export type Mode = 'product' | 'seller';
-
-export interface CheckResult {
-    /** What was checked. */
-    mode: Mode;
-    /** The original URL provided in the input. */
-    url: string;
-    /** The URL actually fetched after normalization + redirects. */
-    finalUrl: string | null;
-    /** Numeric product ID (product mode only). */
-    productId: string | null;
-    /** Numeric store/seller ID (seller mode only). */
-    storeId: string | null;
-    /** ISO-3166 alpha-2 market the check ran under (storefront + proxy exit + region cookie). */
-    country: string;
-    /** true = page is live, false = removed/disabled, null = could not determine */
-    available: boolean | null;
-    status: 'available' | 'unavailable' | 'error';
-    title: string | null;
-    httpStatus: number | null;
-    /** Size of the HTML Cheerio received — useful to tell a real page (~70 KB+) from a block stub. */
-    htmlLength: number | null;
-    error?: string;
-    checkedAt: string;
-}
-
-/** Back-compat alias. */
-export type ProductStatus = CheckResult;
+import { checkProduct } from './checkProduct.js';
+import type { CheckerConfig } from './config.js';
+import { storefrontForRequest } from './config.js';
+import { classifyPage, isNotFoundPage } from './detection.js';
+import { pushRecord } from './pushRecord.js';
+import { createStatusResponse } from './response.js';
 
 /**
- * One dataset row — the shape the user actually receives. Deliberately narrower than
- * {@link CheckResult}, which carries diagnostics that only matter inside the crawl.
- *
- * `actorRunId` is required rather than optional: every row states which run produced it, and `null`
- * is the honest value for a local run (see {@link currentActorRunId}). Leaving the field off
- * entirely would make "ran locally" indistinguishable from "we forgot to stamp it".
+ * Per-run tally of how many times we rotated the session because of an anti-bot block, keyed by
+ * reason (`captcha`, `punish`, `blocked`, `empty-product`, ...). Each entry counts one actual
+ * block-and-retry event — unlike Crawlee's `requestsRetries`, which only counts +1 per request no
+ * matter how many times it was retried. Read this after `crawler.run()` for the true captcha tally.
  */
-export interface OutputItem {
-    /** The original URL provided in the input. */
-    url: string;
-    /** ISO-3166 alpha-2 market the check ran under. */
-    country: string;
-    active: boolean;
-    reason: CheckResult['status'];
-    checkedAt: string;
-    /** ID of the platform run that produced this row; `null` when running locally. */
-    actorRunId: string | null;
+export const rotationStats: Record<string, number> = {};
+
+/**
+ * Retire the current session and throw so Crawlee retries the request on a fresh session
+ * (which, with the session pool + residential proxy, means a new sticky IP and a new
+ * fingerprint). This is the core of the rotate-first anti-bot strategy.
+ */
+function rotateAndRetry(
+    { session, request, log }: Pick<PlaywrightCrawlingContext, 'session' | 'request' | 'log'>,
+    reason: string,
+): never {
+    rotationStats[reason] = (rotationStats[reason] ?? 0) + 1;
+    log.warning(`Block detected — rotating session and retrying.`, {
+        reason,
+        url: request.url,
+        sessionId: session?.id,
+        retryCount: request.retryCount,
+    });
+    session?.retire();
+    throw new Error(`Anti-bot block (${reason}); rotating to a fresh session/proxy.`);
 }
 
 /**
- * Extract the numeric product ID from an AliExpress item URL,
- * e.g. https://vi.aliexpress.com/item/1005004771213104.html -> "1005004771213104".
+ * Recover the block reason {@link rotateAndRetry} encoded into its error message.
+ *
+ * The two are a matched pair — change the message above and this pattern with it. Reading the reason
+ * back out of the message (rather than threading it through Crawlee's retry machinery) keeps the
+ * rotation path free of extra state; `null` simply means the failure was something else entirely,
+ * such as a navigation timeout or a proxy error.
  */
-export function extractProductId(url: string): string | null {
-    const match = url.match(/item\/(\d+)\.html/i);
-    return match ? match[1] : null;
+export function blockReasonFromError(error: unknown): string | null {
+    const message = error instanceof Error ? error.message : String(error);
+    return /^Anti-bot block \(([^)]+)\)/.exec(message)?.[1] ?? null;
 }
 
 /**
- * Extract the numeric store/seller ID from an AliExpress store URL,
- * e.g. https://www.aliexpress.com/store/1101692994?spm=... -> "1101692994".
+ * Push the record for a URL AliExpress has no listing for.
+ *
+ * This is the headline answer of this Actor, not an error: the run asked whether the item exists and
+ * got a definite "no". It has to be a dataset row rather than a dropped request or a
+ * `failedRequestHandler` error — especially in a batch, where one dead id must not read like a
+ * scrape failure.
  */
-export function extractStoreId(url: string): string | null {
-    const match = url.match(/store\/(\d+)/i);
-    return match ? match[1] : null;
+async function pushNoListing(url: string, originalUrl: string, shipToCountry: string, config: CheckerConfig, log: Log): Promise<void> {
+    const response = createStatusResponse(url, originalUrl);
+    response.shipToCountry = shipToCountry;
+    response.storefront = storefrontForRequest(shipToCountry, config).site;
+    response.exists = false;
+    response.success = false;
+    response.errorCode = 'not_found';
+    // AliExpress's 404 page states no reason of its own, so the message is ours.
+    response.errorMessage = `AliExpress has no listing with item id ${response.productId} (it served its 404 page).`;
+    await pushRecord(response, log);
 }
 
 /**
- * Rebuild a clean, canonical URL, dropping the tracking query string (`spm`, `gatewayAdapt` and
- * friends — the region they encode has already been read out by `detectShipToCountry`).
+ * Build the Playwright router. The handler navigates to bootstrap the anti-bot cookies, then defers
+ * to {@link checkProduct} (which answers from the signed `pdp.pc.query` MTOP JSON — no page DOM is
+ * scraped).
  *
- * PRODUCT mode puts the URL on the storefront host of `country`, e.g. `ES` →
- * `https://es.aliexpress.com/item/<id>.html`. The host comes from `country`, not from whatever the
- * user pasted, so a stale subdomain can't disagree with the market we check under — and it is NOT
- * collapsed to `www`, because availability is per-market: asking `www` (the US storefront) about a
- * listing the seller only ships to Spain reports it as removed when it is live. Omitting `country`
- * keeps the historical `www` behavior.
+ * The handler stays thin: it owns the Crawlee-session-specific rotation (`rotateAndRetry`) and defers
+ * the rest. The interceptor fallback is on (it navigated to the PDP, so the intercepted response is
+ * usable).
  *
- * SELLER mode always uses `www`: a store either exists or it doesn't, the same answer in every
- * market, so there is nothing to localize.
- *
- * Every host produced here is on `aliexpress.com`, which keeps the original reason this function
- * exists: hosts on the `.us` TLD redirect cross-domain to `.com` and set cookies for that domain,
- * which Crawlee's strict cookie jar rejects — breaking the redirect chain and landing on a page
- * without `og:title`.
+ * A factory (rather than a module-level singleton) so the handler can read the resolved
+ * {@link CheckerConfig} without reaching for globals.
  */
-export function normalizeUrl(url: string, mode: Mode, country?: string): string {
-    if (mode === 'seller') {
-        const storeId = extractStoreId(url);
-        return storeId ? `https://www.aliexpress.com/store/${storeId}` : url;
-    }
-    const productId = extractProductId(url);
-    return productId ? `https://${storefrontHost(country)}/item/${productId}.html` : url;
-}
+export function createRouter(config: CheckerConfig) {
+    const router = createPlaywrightRouter();
 
-/** Back-compat: product-only normalizer on the global host. */
-export function normalizeAliexpressUrl(url: string): string {
-    return normalizeUrl(url, 'product');
-}
+    router.addDefaultHandler(async (ctx) => {
+        const { request, page, log } = ctx;
 
-/**
- * Detect AliExpress anti-bot interstitials (captcha / "slide to verify" / punish page)
- * so we retry instead of falsely recording "unavailable".
- *
- * We rely on strong signals only — the *final* URL after redirects and the page size —
- * NOT on scanning the body for strings like `nc_token`/`_____tmd_____`, which appear in
- * the anti-fraud JS SDK embedded on EVERY page (including live ones) and cause false
- * positives. A real page is large (~70 KB+); punish/login pages are tiny or live under
- * dedicated paths.
- */
-export function looksBlocked(finalUrl: string | null, html: string): boolean {
-    const loaded = (finalUrl ?? '').toLowerCase();
-    if (/\/(punish|_____tmd_____|sec\/|login|captcha)/.test(loaded) || loaded.includes('punish.aliexpress')) {
-        return true;
-    }
-    // Live pages are large. A short body without og:title is almost always a
-    // block/redirect stub rather than a genuine "removed" page.
-    return html.length < 5000;
-}
+        // Ship-to was resolved from the raw start URL in `main.ts` and rides on `userData`; the same
+        // value already went into the `aep_usuc_f` cookie via the preNavigationHook, and now has to
+        // match the `country` we sign into the MTOP payload.
+        const shipToCountry = (request.userData?.shipToCountry as string | undefined) ?? config.defaultShipToCountry;
+        // The row reports the URL the user pasted, not the canonical one we rewrote it to.
+        const originalUrl = (request.userData?.originalUrl as string | undefined) ?? request.url;
 
-/**
- * The market a response actually landed in, read off the final URL after redirects.
- *
- * AliExpress routes on the EXIT IP, not on the host you asked for: requesting
- * `es.aliexpress.com` from a Vietnamese IP is answered with a 302 to
- * `vi.aliexpress.com?gatewayAdapt=esp2vnm`. The page that comes back is a real page — it just
- * answers a different question than the one we asked.
- */
-export function landedMarket(finalUrl: string | null): string {
-    return (finalUrl ? detectShipToCountry(finalUrl) : null) ?? DEFAULT_SHIP_TO_COUNTRY;
-}
-
-/**
- * Decide availability purely from the parsed page. The presence of the
- * `<meta property="og:title">` tag is the signal: live product/store pages expose it,
- * removed ones do not. Pure (no I/O) so it can be unit-tested.
- *
- * @throws when the page looks like an anti-bot block, or when the response came back from a
- * different market than the one asked for, so the crawler retries on a fresh session/IP.
- */
-export function parseStatus(
-    mode: Mode,
-    $: CheerioAPI,
-    originalUrl: string,
-    finalUrl: string | null,
-    statusCode: number | null,
-    html: string,
-    country: string = DEFAULT_SHIP_TO_COUNTRY,
-): CheckResult {
-    const productId = mode === 'product' ? (extractProductId(originalUrl) ?? extractProductId(finalUrl ?? '')) : null;
-    const storeId = mode === 'seller' ? (extractStoreId(originalUrl) ?? extractStoreId(finalUrl ?? '')) : null;
-    const title = $('meta[property="og:title"]').attr('content')?.trim() || null;
-    const checkedAt = new Date().toISOString();
-    const base = { mode, url: originalUrl, finalUrl, productId, storeId, country, httpStatus: statusCode, htmlLength: html.length, checkedAt };
-
-    // Availability is per-market, so an answer from the wrong market is not a weaker answer — it is
-    // an answer to a different question, and reporting it would be a lie in both directions. This is
-    // checked BEFORE the title, because a page redirected to another storefront can carry a perfectly
-    // good `og:title` and still say nothing about the market we were asked about. Throwing rotates
-    // the session onto a fresh proxy IP in the right country; if it never lands, the URL ends up as
-    // `error` rather than a confident wrong verdict. Seller mode is market-agnostic, so it is exempt.
-    const landed = landedMarket(finalUrl);
-    if (mode === 'product' && landed !== country.toUpperCase()) {
-        throw new Error(
-            `Landed on the ${landed} storefront while checking the ${country} market (final URL ${finalUrl}) — ` +
-                `AliExpress routes on the exit IP, so the proxy is not in ${country}. Retrying with a new session.`,
-        );
-    }
-
-    if (title) {
-        return { ...base, available: true, status: 'available', title };
-    }
-
-    if (looksBlocked(finalUrl, html)) {
-        throw new Error(
-            `Request looks blocked by AliExpress anti-bot (HTTP ${statusCode}, final URL ${finalUrl}). Retrying with a new session.`,
-        );
-    }
-
-    return { ...base, available: false, status: 'unavailable', title: null };
-}
-
-/** Back-compat wrapper for product mode. */
-export function parseProductStatus(
-    $: CheerioAPI,
-    originalUrl: string,
-    finalUrl: string | null,
-    statusCode: number | null,
-    html: string,
-    country?: string,
-): CheckResult {
-    return parseStatus('product', $, originalUrl, finalUrl, statusCode, html, country);
-}
-
-export const router = createCheerioRouter();
-
-// We never follow links — each input URL is checked in isolation.
-router.addDefaultHandler(async ({ request, response, body, $, log, pushData, sendRequest }) => {
-    const originalUrl = (request.userData?.originalUrl as string | undefined) ?? request.url;
-    const mode = ((request.userData?.mode as Mode | undefined) ?? 'product') satisfies Mode;
-    const country = (request.userData?.country as string | undefined) ?? DEFAULT_SHIP_TO_COUNTRY;
-    const verifyShipTo = (request.userData?.verifyShipTo as boolean | undefined) ?? true;
-    const finalUrl = request.loadedUrl ?? request.url;
-    const html = typeof body === 'string' ? body : body.toString('utf8');
-
-    const result = parseStatus(mode, $, originalUrl, finalUrl, response?.statusCode ?? null, html, country);
-
-    // The HTML says only whether the listing still EXISTS. Whether the seller ships it to `country`
-    // lives behind the same signed API the page itself calls, so ask it — reusing this request's
-    // session cookies and its per-country proxy exit, which is what makes the call look legitimate.
-    // Only worth asking when the HTML already said "exists": a deleted listing has nothing to ship.
-    if (verifyShipTo && mode === 'product' && result.available && result.productId) {
-        const verdict = await probeAvailability(
-            sendRequest as unknown as SendRequest,
-            result.productId,
-            country,
-            (message, data) => log.debug(message, data),
-        );
-        if (verdict.status === 'blocked') {
-            // Not a verdict about the product — a verdict about our session. Throwing rotates onto a
-            // fresh proxy IP rather than recording a guess.
-            throw new Error(
-                `MTOP pdp.pc.query did not answer for ${result.productId} in ${country} ` +
-                    `(ret "${verdict.ret}", ${verdict.reason}). Retrying with a new session.`,
-            );
+        // Hard block on arrival → rotate immediately.
+        const arrival = await classifyPage(page);
+        if (arrival === 'captcha' || arrival === 'punish' || arrival === 'blocked') {
+            rotateAndRetry(ctx, arrival);
         }
-        if (verdict.status === 'unavailable') {
-            result.available = false;
-            result.status = 'unavailable';
+        // A 404 caught this early is the answer outright — record it and stop before spending a proxy
+        // request on the signed API for a listing that isn't there.
+        if (arrival === 'notfound') {
+            await pushNoListing(request.url, originalUrl, shipToCountry, config, log);
+            log.info('item id does not exist — recorded as not found', { requestId: request.id, url: request.url });
+            return;
         }
-    }
 
-    const id = result.productId ?? result.storeId;
-    if (result.available) {
-        log.info(`[${mode}] AVAILABLE: ${result.title}`, { url: originalUrl, id, country, htmlLength: result.htmlLength });
-    } else {
-        // A title on an unavailable row means the listing exists but is not sold into this market,
-        // as opposed to having been deleted outright.
-        log.info(`[${mode}] UNAVAILABLE${result.title ? ' (not sold in this market)' : ' (listing removed)'}`, {
-            url: originalUrl,
-            id,
-            country,
-            title: result.title,
-            httpStatus: result.httpStatus,
-            htmlLength: result.htmlLength,
+        log.info('status check pass', { requestId: request.id, retryCount: request.retryCount, pageUrl: page.url(), shipToCountry });
+
+        const { response, blocked, blockReason, unavailableInRegion } = await checkProduct(page, request.url, config, log, {
+            interceptorFallback: true,
+            shipToCountry,
+            originalUrl,
         });
-    }
+        // The storefront answered "we don't sell this here". That is the ANSWER, not a block — push it
+        // and stop. Rotating would spend the whole retry budget on a listing no clean IP can unlock.
+        if (unavailableInRegion) {
+            await pushRecord(response, log);
+            log.info('recorded as unavailable in region', {
+                requestId: request.id,
+                shipToCountry,
+                errorMessage: response.errorMessage,
+            });
+            return;
+        }
+        if (blocked) {
+            // The signed call came back with nothing. Before treating that as a block, give the 404
+            // markers a moment to arrive: navigation resolves at `commit`, so on the first pass the
+            // document may not have been parsed far enough for the arrival check above to see them.
+            // Paying ~3s HERE is the whole point — the alternative is ten rotations chasing an id
+            // that does not exist.
+            if (await isNotFoundPage(page, 3_000)) {
+                await pushNoListing(request.url, originalUrl, shipToCountry, config, log);
+                log.info('item id does not exist — recorded as not found', { requestId: request.id, url: request.url });
+                return;
+            }
+            // `pdp-blocked` may actually be a captcha/punish overlay — reclassify for an accurate tally
+            // (an 'ok' classification with no JSON means the signed call timed out, not a hard block).
+            let reason = blockReason ?? 'empty-product';
+            if (blockReason === 'pdp-blocked') {
+                const status = await classifyPage(page);
+                reason = status === 'ok' ? 'pdp-timeout' : status;
+            }
+            rotateAndRetry(ctx, reason);
+        }
 
-    // Output only the fields the user cares about. `country` is part of the answer, not metadata:
-    // "unavailable" is only ever true *for that market*.
-    const item: OutputItem = {
-        url: result.url,
-        country: result.country,
-        active: result.available === true,
-        reason: result.status,
-        checkedAt: result.checkedAt,
-        actorRunId: currentActorRunId(),
-    };
-    await pushData(item);
-});
+        await pushRecord(response, log);
+        log.info('checked successfully', { requestId: request.id, retryCount: request.retryCount });
+    });
 
-/**
- * Records a result row even when a URL fails permanently (after all retries),
- * so the dataset has one row per input URL instead of silently dropping failures.
- */
-export async function failedRequestHandler({ request, log }: CheerioCrawlingContext, error: Error): Promise<void> {
-    const originalUrl = (request.userData?.originalUrl as string | undefined) ?? request.url;
-    const mode = ((request.userData?.mode as Mode | undefined) ?? 'product') satisfies Mode;
-    const country = (request.userData?.country as string | undefined) ?? DEFAULT_SHIP_TO_COUNTRY;
-    log.warning(`[${mode}] ERROR after retries: ${error.message}`, { url: originalUrl, country });
-    const item: OutputItem = {
-        url: originalUrl,
-        country,
-        active: false,
-        reason: 'error',
-        checkedAt: new Date().toISOString(),
-        actorRunId: currentActorRunId(),
-    };
-    await Actor.pushData(item);
+    return router;
 }

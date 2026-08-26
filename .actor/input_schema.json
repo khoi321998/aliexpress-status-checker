@@ -7,52 +7,78 @@
         "mode": {
             "title": "Mode",
             "type": "string",
-            "description": "What kind of URL to check: product item pages or seller/store pages.",
+            "description": "What kind of URL to check. \"Product\": item pages, checked in a real browser against the same signed API the product page itself calls, per market — this is what catches a listing that still exists globally but has been withdrawn from your buyers' country. \"Seller\": store pages, checked over plain HTTP — a store exists or it doesn't, identically in every market, so the market and browser options below do not apply.",
             "editor": "select",
             "default": "product",
             "enum": ["product", "seller"],
             "enumTitles": ["Product (item page)", "Seller (store page)"]
         },
         "startUrls": {
-            "title": "AliExpress URLs",
+            "title": "Start URLs",
             "type": "array",
-            "description": "List of AliExpress URLs to check. For product mode use item pages (e.g. https://es.aliexpress.com/item/1005008991183191.html); for seller mode use store pages (e.g. https://www.aliexpress.com/store/1101692994). Each URL is checked independently. In product mode the market is read from the URL itself (the locale subdomain or the gatewayAdapt stamp) and the check runs on that storefront through a residential proxy in that same country — paste the URL exactly as your buyers see it, since a product can be live in one country and gone in another. URLs without a regional signal (www./m.) are checked as US.",
+            "description": "AliExpress URLs to check. For product mode use item pages (https://www.aliexpress.com/item/<id>.html); for seller mode use store pages (https://www.aliexpress.com/store/<id>). Each URL is checked independently. In product mode the market is read from the URL itself (the locale subdomain or the ?gatewayAdapt stamp) and the check runs on that storefront through a proxy in the same country — paste the URL exactly as your buyers see it, since a product can be live in one country and withdrawn in another. URLs without a regional signal (www./m.) are checked as US.",
             "editor": "requestListSources",
             "prefill": [
                 {
-                    "url": "https://vi.aliexpress.com/item/1005004771213104.html"
+                    "url": "https://www.aliexpress.com/item/3256805894825145.html"
                 }
             ]
         },
-        "verifyShipTo": {
-            "title": "Verify the product ships to the market",
+        "shipToCountry": {
+            "title": "Ship To Country",
+            "type": "string",
+            "description": "Product mode only. Two-letter country code (ISO 3166-1 alpha-2, e.g. ES, DE, VN) to use as the delivery destination for every URL. Some listings only exist for certain destinations. The checker also routes its proxy through this country, so the delivery address and the connection agree. Leave empty to auto-detect per URL from the address you pasted (e.g. https://es.aliexpress.com/... or ?gatewayAdapt=glo2esp becomes Spain), falling back to US when the URL carries no region.",
+            "editor": "textfield"
+        },
+        "matchStorefrontLocale": {
+            "title": "Check Each Product On Its Local Storefront",
             "type": "boolean",
-            "description": "Product mode only. The page HTML only reveals whether a listing still EXISTS — a product that is live but not shipped to your market returns a page that is byte-for-byte indistinguishable from an available one, because AliExpress loads all product data client-side. With this on, the Actor additionally asks the same signed API the page itself calls, so \"not available in your location\" is reported as unavailable instead of available. Turn it off to fall back to the faster HTML-only check, which detects deleted listings only.",
+            "description": "Product mode only. Check every product on the delivery country's own storefront, exactly as a shopper there does. This is what makes the answer truthful: the global catalogue still answers for listings a local storefront has withdrawn, so with this off a product a Spanish shopper cannot order is reported as active. With it on, such a listing is recorded as active = false, reason = \"unavailable\". Turn off to ask the global catalogue instead — \"does this item id exist at all\" rather than \"can a buyer in this market get it\".",
             "default": true
         },
+        "residentialProxy": {
+            "title": "Use Residential Proxy",
+            "type": "boolean",
+            "description": "Route ALL traffic through Apify's residential proxy instead of the cheaper datacenter pool. Destinations outside the US already use residential automatically, because the datacenter pool only holds US addresses. Turn this on to use residential for US checks too — datacenter addresses are recognised and challenged by AliExpress far more often. Costs more per request.",
+            "default": false
+        },
         "maxConcurrency": {
-            "title": "Max concurrency",
+            "title": "Max Concurrency",
             "type": "integer",
-            "description": "Maximum number of product URLs checked in parallel. Keep low (3-5) to avoid triggering AliExpress anti-bot.",
-            "default": 5,
+            "description": "How many product URLs are checked in parallel. Browser crawls stay under the radar at low concurrency — raising this increases the captcha rate.",
+            "default": 2,
             "minimum": 1,
-            "maximum": 50
+            "maximum": 10
+        },
+        "maxRequestsPerCrawl": {
+            "title": "Max Requests Per Run",
+            "type": "integer",
+            "description": "Hard ceiling on how many URLs one run may check. Acts as a cost guard for large input lists.",
+            "default": 100,
+            "minimum": 1,
+            "maximum": 1000
+        },
+        "maxRequestRetries": {
+            "title": "Max Request Retries",
+            "type": "integer",
+            "description": "How many times a blocked URL is retried on a fresh session/IP before it is recorded as reason = \"error\". Rotation needs room to find a clean residential IP, so keep this generous.",
+            "default": 10,
+            "minimum": 0,
+            "maximum": 20
         },
         "sameDomainDelaySecs": {
-            "title": "Delay between requests (seconds)",
+            "title": "Delay Between Requests (seconds)",
             "type": "integer",
-            "description": "Minimum delay between consecutive requests to AliExpress. Increasing this (e.g. 2-5) reduces blocking.",
+            "description": "Seller mode only. Minimum delay between consecutive requests to AliExpress. Increasing this (e.g. 2-5) reduces blocking. Product mode paces itself through the session pool instead.",
             "default": 0,
             "minimum": 0,
             "maximum": 60
         },
-        "maxRequestRetries": {
-            "title": "Max request retries",
-            "type": "integer",
-            "description": "How many times to retry a URL (with a fresh session/proxy) when it appears blocked, before recording it as an error.",
-            "default": 3,
-            "minimum": 0,
-            "maximum": 10
+        "headless": {
+            "title": "Headless Browser",
+            "type": "boolean",
+            "description": "Product mode only. Run Chrome in headless (new) mode. Disable to run headful via Xvfb, which is harder to detect but uses more resources.",
+            "default": true
         }
     },
     "required": ["startUrls"]

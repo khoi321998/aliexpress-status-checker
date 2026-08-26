@@ -3,12 +3,12 @@
 	"actorSpecification": 1,
 	"name": "aliexpress-product-status-checker",
 	"title": "AliExpress Product Status Checker",
-	"description": "Checks whether AliExpress product pages are still available by detecting the og:title meta tag.",
+	"description": "Checks whether an AliExpress listing still exists for a given market, by asking the same signed pdp.pc.query API the product page itself calls.",
 	"version": "0.0",
 	"buildTag": "latest",
 	"meta": {
-		"templateId": "ts-crawlee-cheerio",
-		"generatedBy": "Claude Code with Claude Opus 4.8"
+		"templateId": "ts-crawlee-playwright-chrome",
+		"generatedBy": "Claude Code with Claude Opus 5"
 	},
 	"input": "./input_schema.json",
 	"output": "./output_schema.json",
